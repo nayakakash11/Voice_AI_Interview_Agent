@@ -18,6 +18,9 @@ This application is based on the "Agentic AI" flow, where different services (pa
 
 * **Automated Email Report:** The final evaluation report is automatically and securely emailed to a pre-configured HR email address. The candidate does not see the final report.
 
+## Agentic Workflow
+<img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/0e791722-c653-4b85-873d-3a9be4721902" />
+
 ## Technology Stack
 
 **Backend:**
