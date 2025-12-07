@@ -1,17 +1,19 @@
 import os
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from google import genai
+from google.genai import types
 from typing import List, Tuple, Optional, TypedDict
-import requests  # <-- Import for making synchronous REST API calls for TTS
 import json
+import base64
 
 # Configure the Gemini API key
 api_key = os.getenv("GOOGLE_API_KEY")
+client = None
+
 if not api_key:
     print("⚠️ WARNING: GOOGLE_API_KEY not found in environment variables.")
     print("   Please set it in your .env file in the project root.")
 else:
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
 # In services/gemini_service.py (add this new class)
 
@@ -29,22 +31,9 @@ safety_settings = [
 ]
 
 # --- Model Initialization ---
-text_model = None
-# We do not initialize a tts_model, as the 'genai' library does not support it.
-# We will call the TTS REST API directly.
+# We do not initialize a tts_model, as we use the client for everything.
 
-if api_key:
-    try:
-        # Text generation model
-        text_model = genai.GenerativeModel(
-            # Using a stable, latest model name
-            model_name="gemini-2.5-flash", 
-            safety_settings=safety_settings
-        )
-        
-    except Exception as e:
-        print(f"⚠️ WARNING: Failed to initialize Gemini models: {e}")
-else:
+if not client:
     print("⚠️ WARNING: Models not initialized - GOOGLE_API_KEY not set")
 
 # In services/gemini_service.py (add this new async function)
@@ -57,15 +46,9 @@ async def check_answer_sufficiency(question: str, answer: str) -> AnswerSufficie
     print(f"Checking sufficiency for Q: {question} | A: {answer}")
     
     # Define the generation config to force JSON output
-    generation_config = genai.GenerationConfig(
+    config = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=AnswerSufficiency,
-    )
-
-    # Initialize the model (using a model that supports JSON mode, like 1.5 Pro)
-    model = genai.GenerativeModel(
-        "gemini-2.5-flash",
-        generation_config=generation_config
     )
 
     prompt = f"""
@@ -95,7 +78,11 @@ You are an expert technical interviewer. Evaluate the candidate's answer.
     }} """
 
     try:
-        response = await model.generate_content_async(prompt)
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=config
+        )
         text_response = response.text.strip()
         # Parse the JSON response
         if text_response.startswith("```json"):
@@ -106,7 +93,7 @@ You are an expert technical interviewer. Evaluate the candidate's answer.
         response_json = json.loads(text_response)
         
         # Validate and return
-        
+        print(f"Raw sufficiency response: {response_json}")
         is_sufficient = response_json.get("is_sufficient", True)
         follow_up = response_json.get("follow_up_question", None)
 
@@ -114,6 +101,8 @@ You are an expert technical interviewer. Evaluate the candidate's answer.
             print("Answer is sufficient.")
             return {"is_sufficient": True, "follow_up_question": None}
         else:
+            if not follow_up:
+                follow_up = "Could you please provide more details?"
             print(f"Answer is insufficient. Follow-up: {follow_up}")
             return {"is_sufficient": False, "follow_up_question": follow_up}
 
@@ -128,8 +117,8 @@ def generate_questions_from_text(resume_text: str, job_description: str, rag_con
     """
     Generates interview questions using Gemini. (SYNCHRONOUS)
     """
-    if not text_model:
-        raise ValueError("Gemini model not initialized. Please check GOOGLE_API_KEY in .env file.")
+    if not client:
+        raise ValueError("Gemini client not initialized. Please check GOOGLE_API_KEY in .env file.")
     # 3. Third question?
     system_prompt = f"""
 You are an expert HR manager conducting a technical and behavioral interview. 
@@ -158,9 +147,10 @@ Example:
 
     try:
         # --- FIXED: Changed to 'generate_content' (synchronous) ---
-        response = text_model.generate_content(
-            [system_prompt, user_prompt],
-            generation_config=GenerationConfig(temperature=0.7)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[system_prompt, user_prompt],
+            config=types.GenerateContentConfig(temperature=0.7)
         )
         
         text = response.text
@@ -189,8 +179,8 @@ async def evaluate_transcript(transcript_text: str) -> str: # Made a change
     """
     Evaluates a full interview transcript using Gemini. (SYNCHRONOUS)
     """
-    if not text_model:
-        raise ValueError("Gemini model not initialized. Please check GOOGLE_API_KEY in .env file.")
+    if not client:
+        raise ValueError("Gemini client not initialized. Please check GOOGLE_API_KEY in .env file.")
     
     system_prompt = """
 You are a senior hiring manager providing a final evaluation for a job candidate. 
@@ -219,9 +209,10 @@ Please provide your evaluation now.
     
     try:
         # --- FIXED: Changed to 'generate_content' (synchronous) ---
-        response =  text_model.generate_content(
-            [system_prompt, user_prompt],
-            generation_config=GenerationConfig(temperature=0.5)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[system_prompt, user_prompt],
+            config=types.GenerateContentConfig(temperature=0.5)
         )
         return response.text
     
@@ -232,58 +223,46 @@ Please provide your evaluation now.
 # --- FIXED: TTS Function (Synchronous REST API call) ---
 async def generate_tts_audio(text_to_speak: str, voice: str = "Kore") -> Tuple[Optional[str], Optional[str]]: # change
     """
-    Generates TTS audio using the Gemini API via a direct REST call. (SYNCHRONOUS)
+    Generates TTS audio using the Gemini API via the google-genai SDK.
     Returns (base64_audio_data, mime_type)
     """
     print(f"Generating TTS audio for text: {text_to_speak}")
-    global api_key
-    if not api_key:
+    if not client:
         print("Error in TTS: GOOGLE_API_KEY not set.")
         return None, None
 
     prompt = f"Say in a professional, clear, and neutral tone: {text_to_speak}"
     
-    # This is the correct, direct REST API endpoint for this model
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={api_key}"
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": voice}
-                }
-            }
-        }
-    }
-
     try:
-        # Use a SYNCHRONOUS 'requests.post' call.
-        # This will block until the audio is ready, which is
-        # correct for a synchronous Streamlit app.
-        response = requests.post(url, json=payload, timeout=30)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                    )
+                )
+            )
+        )
         
-        # Raise an error if the API returned a bad status (e.g., 404, 500)
-        response.raise_for_status() 
-        
-        result = response.json()
-        
-        if "candidates" in result and len(result["candidates"]) > 0:
-            part = result["candidates"][0].get("content", {}).get("parts", [{}])[0]
-            inline_data = part.get("inlineData", {})
-            audio_data = inline_data.get("data")
-            mime_type = inline_data.get("mimeType")
-            
-            if audio_data and mime_type and mime_type.startswith("audio/"):
+        # Extract audio data
+        # The response structure for audio might be in candidates[0].content.parts[0].inline_data
+        if response.candidates and len(response.candidates) > 0:
+            part = response.candidates[0].content.parts[0]
+            if part.inline_data:
+                audio_bytes = part.inline_data.data
+                mime_type = part.inline_data.mime_type
+                
+                # Convert bytes to base64 string
+                audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
                 print(f"Generated audio MIME type: {mime_type}")
-                return audio_data, mime_type
+                return audio_b64, mime_type
         
-        # If we get here, the response was valid JSON but didn't contain audio
-        print(f"Invalid audio response structure from API: {result}")
-        raise ValueError("Invalid audio response structure from API.")
+        print(f"Invalid audio response structure from API.")
+        return None, None
             
     except Exception as e:
         print(f"Error in Gemini TTS generation: {e}")

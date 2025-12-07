@@ -283,7 +283,7 @@ async function finishInterview() {
 // --- Initial Event Listeners ---
 startInterviewBtn.addEventListener('click', handleStartInterview);
 restartBtn.addEventListener('click', () => {
-    // Reset everything
+    // Reset everything 
     switchScreen('setup');
     questions = [];
     transcript = [];

@@ -1,0 +1,10 @@
+interview_state.db
+interview_state.db-shm
+interview_state.db-wal
+__pycache__
+.git
+.gitignore
+testWithK.txt
+testWithreq.txt
+*.pyc
+.DS_Store

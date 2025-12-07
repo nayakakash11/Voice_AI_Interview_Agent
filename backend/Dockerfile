@@ -15,7 +15,7 @@ COPY requirements.txt .
 # 2. Install dependencies
 # Note: Python 3.12 removed 'distutils', so we ensure setuptools is up to date
 RUN pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r req.txt
 
 COPY . .
 

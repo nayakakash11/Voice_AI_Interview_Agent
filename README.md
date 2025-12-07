@@ -176,3 +176,25 @@ python3 -m http.server 8001
 4. Your browser will ask for microphone permission. You must click **Allow**.
 
 5. The interview will begin.
+
+
+langchain==1.0.6
+langchain-classic==1.0.0
+langchain-community==0.4.1
+langchain-core==1.0.5
+langchain-google-genai
+langchain-text-splitters==1.0.0
+langgraph==1.0.3
+langgraph-checkpoint==3.0.0
+langgraph-checkpoint-sqlite==3.0.0
+langgraph-prebuilt==1.0.4
+langgraph-sdk==0.2.9
+langsmith==0.4.42
+google-api-core
+google-api-python-client==2.185.0
+google-auth==2.41.1
+google-auth-httplib2==0.2.0
+google-generativeai
+googleapis-common-protos==1.71.0
+grpcio
+grpcio-status
