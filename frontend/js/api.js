@@ -1,7 +1,7 @@
 // This file now calls our local backend, not the Gemini API directly.
 
-const BACKEND_URL = "http://127.0.0.1:8000";
-
+const BACKEND_URL = "http://localhost:8000";
+//  window.env.BACKEND_URL ||
 /**
  * Helper function to handle fetch responses
  */
@@ -26,6 +26,7 @@ export async function uploadResume(file) {
         method: 'POST',
         body: formData,
     });
+    console.log("Upload response status:", response);
     return handleResponse(response);
 }
 
@@ -45,6 +46,7 @@ export async function getQuestions(resume_text) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     });
+    console.log("Get questions response status:", response);
     return handleResponse(response);
 }
 
@@ -85,76 +87,135 @@ export async function sendEmail(candidate_resume, evaluation_report) {
     return handleResponse(response);
 }
 
+// --- LangGraph API Functions ---
+
+/**
+ * Starts a new interview using LangGraph.
+ * @param {File} file - The resume PDF file.
+ * @returns {Promise<object>} - The response containing session_id and initial state.
+ */
+export async function startInterviewGraph(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${BACKEND_URL}/interview-graph/start`, {
+        method: 'POST',
+        body: formData,
+    });
+    return handleResponse(response);
+}
+
+/**
+ * Submits an answer for the current question.
+ * @param {string} sessionId - The interview session ID.
+ * @param {string} answer - The user's answer.
+ * @returns {Promise<object>} - The updated state.
+ */
+export async function submitAnswer(sessionId, answer) { 
+    console.log("Submitting answer to backend:", answer);
+    const response = await fetch(`${BACKEND_URL}/interview-graph/${sessionId}/submit-answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 'answer' :answer}),
+    });
+    return handleResponse(response);
+}
+
+/**
+ * Gets the current state of an interview session.
+ * @param {string} sessionId - The interview session ID.
+ * @returns {Promise<object>} - The current state.
+ */
+export async function getInterviewState(sessionId) {
+    const response = await fetch(`${BACKEND_URL}/interview-graph/${sessionId}/state`);
+    return handleResponse(response);
+}
+
+/**
+ * Creates a WebSocket connection for real-time updates.
+ * @param {string} sessionId - The interview session ID.
+ * @param {function} onMessage - Callback for received messages.
+ * @returns {WebSocket} - The WebSocket connection.
+ */
+export function createInterviewWebSocket(sessionId, onMessage) {
+    const ws = new WebSocket(`ws://127.0.0.1:8000/interview-graph/${sessionId}/ws`);
+    
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+    };
+    
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+    
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+    };
+    
+    return ws;
+}
+
+/**
+ * Sends an answer through WebSocket.
+ * @param {WebSocket} ws - The WebSocket connection.
+ * @param {string} answer - The user's answer.
+ */
+export function sendAnswerViaWebSocket(ws, answer) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'answer',
+            answer: answer
+        }));
+    }
+}
+
 
 // --- TTS is still handled by the browser-based Gemini API ---
 // This keeps the voice interaction fast and avoids audio streaming.
 // You MUST add your Google AI API key here for TTS to work.
 
-const ttsApiKey = "AIzaSyCWnKnkH-P3kP1_ZRQTbVNr2VJZJ0jm15A"; // <--- PASTE YOUR GOOGLE AI API KEY HERE
-const genTtsApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${ttsApiKey}`;
+// TTS API key should be obtained from backend or environment
+// For security, TTS should be handled by the backend, not frontend
+// This function will call the backend TTS endpoint instead
+const BACKEND_TTS_URL = `${BACKEND_URL}/generate-tts`;
 
 /**
- * Calls the Gemini TTS API with exponential backoff.
+ * Calls the backend TTS endpoint to generate audio.
  * @param {string} textToSpeak - The text to synthesize.
  * @param {string} [voice="Kore"] - The voice to use.
- * @param {number} [maxRetries=3] - Maximum number of retries.
- * @returns {Promise<object>} - The API response JSON with audio data.
+ * @returns {Promise<object>} - The response with audio data and mime type.
  */
-export async function callGeminiTTS(textToSpeak, voice = "Kore", maxRetries = 3) {
-    if (!ttsApiKey) {
-        console.error("TTS API Key is missing in js/api.js");
-        throw new Error("TTS API Key is missing. Please add it to js/api.js.");
-    }
-    
-    const payload = {
-        contents: [{
-            parts: [{ text: `Say in a professional, clear, and neutral tone: ${textToSpeak}` }]
-        }],
-        generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-                voiceConfig: {
-                    prebuiltVoiceConfig: { voiceName: voice }
-                }
-            }
-        },
-        model: "gemini-2.5-flash-preview-tts"
-    };
+export async function callGeminiTTS(textToSpeak, voice = "Kore") {
+    try {
+        const payload = {
+            text: textToSpeak,
+            voice: voice
+        };
 
-    let attempt = 0;
-    let delay = 1000;
+        const response = await fetch(`${BACKEND_URL}/generate-tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
 
-    while (attempt < maxRetries) {
-        try {
-            const response = await fetch(genTtsApiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                throw new Error(`API Error: ${response.statusText}`);
-            }
-            
-            const result = await response.json();
-            const part = result?.candidates?.[0]?.content?.parts?.[0];
-            const audioData = part?.inlineData?.data;
-            const mimeType = part?.inlineData?.mimeType;
-
-            if (audioData && mimeType && mimeType.startsWith("audio/")) {
-                return { audioData, mimeType }; // Success
-            } else {
-                throw new Error("Invalid audio response structure from API.");
-            }
-        } catch (error) {
-            attempt++;
-            if (attempt >= maxRetries) {
-                console.error("Gemini TTS API call failed after max retries:", error);
-                throw error;
-            }
-            console.warn(`Gemini TTS API call attempt ${attempt} failed. Retrying in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2;
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+            throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
         }
+
+        const result = await response.json();
+        return {
+            audioData: result.audio_data,
+            mimeType: result.mime_type
+        };
+    } catch (error) {
+        console.error("TTS generation error:", error);
+        // Return a fallback message instead of throwing
+        throw new Error(`TTS generation failed: ${error.message}`);
     }
 }

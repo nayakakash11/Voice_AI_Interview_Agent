@@ -6,17 +6,23 @@ import {
 } from './ui.js';
 
 import {
-    uploadResume, getQuestions, evaluateInterview, sendEmail, callGeminiTTS
+    uploadResume, getQuestions, evaluateInterview, sendEmail, callGeminiTTS,
+    startInterviewGraph, submitAnswer, getInterviewState, createInterviewWebSocket, sendAnswerViaWebSocket
 } from './api.js';
 
 import { playAudioAndListen } from './audio.js';
-import { setupSpeechRecognition } from './speech.js';
+import { setupSpeechRecognition, startListening } from './speech.js';
 
 // --- State Variables ---
 let questions = [];
 let transcript = [];
 let currentQuestionIndex = 0;
 let finalEvaluation = ""; // Store the final report text
+
+// --- LangGraph State Variables ---
+let sessionId = null;
+let interviewWebSocket = null;
+let useGraphMode = true; // Toggle between graph and legacy mode
 
 // --- Core Application Flow ---
 
@@ -25,12 +31,10 @@ let finalEvaluation = ""; // Store the final report text
  */
 async function handleStartInterview() {
     startInterviewBtn.disabled = true;
-    startInterviewBtn.textContent = 'Parsing Resume...';
-
+    startInterviewBtn.textContent = 'Starting Interview...';
+    
     // === 1. VALIDATE INPUTS ===
     const file = resumeFile.files[0];
-    
-    // Removed validation for jobDescription, companyFactsText, and hrEmailAddress
 
     if (!file) {
         showModal("Missing Information", "Please upload a resume PDF.");
@@ -47,25 +51,55 @@ async function handleStartInterview() {
     }
 
     try {
-        // === 3. UPLOAD & PARSE RESUME ===
-        const uploadResponse = await uploadResume(file);
-        resumeText.value = uploadResponse.resume_text; // Store parsed text
-        
-        // === 4. GENERATE QUESTIONS ===
-        startInterviewBtn.textContent = 'Generating Questions...';
-        // Call getQuestions with only the resume text
-        const questionsResponse = await getQuestions(
-            resumeText.value
-        );
-        
-        questions = questionsResponse.questions;
-        if (questions.length === 0) {
-            throw new Error("Backend did not return any questions.");
+        if (useGraphMode) {
+            // === LANGGRAPH MODE ===
+            startInterviewBtn.textContent = 'Initializing Interview Graph...';
+            console.log("Starting interview graph session...");
+            
+            // Start interview graph
+            const graphResponse = await startInterviewGraph(file);
+            sessionId = graphResponse.session_id;
+            questions = []; // Will be populated from state
+            
+            // Store resume text if available
+            if (graphResponse.resume_text) {
+                resumeText.value = graphResponse.resume_text;
+            }
+            
+            // Setup WebSocket for real-time updates (optional)
+            // interviewWebSocket = createInterviewWebSocket(sessionId, handleGraphStateUpdate);
+            
+            // Get initial state
+            const state = await getInterviewState(sessionId);
+            questions = Array(state.total_questions).fill(''); // Placeholder, will be updated
+            
+            // Start interview with first question
+            switchScreen('interview');
+            await askQuestionFromGraph(state);
+            
+        } else {
+            // === LEGACY MODE (Original Flow) ===
+            startInterviewBtn.textContent = 'Parsing Resume...';
+            
+            // Upload & Parse Resume
+            console.log("Uploading resume for parsing...");
+            const uploadResponse = await uploadResume(file);
+            resumeText.value = uploadResponse.resume_text;
+            
+            // Generate Questions
+            startInterviewBtn.textContent = 'Generating Questions...';
+            const questionsResponse = await getQuestions(resumeText.value);
+            
+            questions = questionsResponse.questions;
+            console.log("Received questions:", questions);
+            if (questions.length === 0) {
+                throw new Error("Backend did not return any questions.");
+            }
+            
+            // Start Interview Q&A Loop
+            switchScreen('interview');
+            askQuestion(0);
         }
-        
-        // === 5. START INTERVIEW Q&A LOOP ===
-        switchScreen('interview');
-        askQuestion(0); // Start with the first question
 
     } catch (error) {
         console.error("Failed to start interview:", error);
@@ -107,23 +141,110 @@ async function askQuestion(index) {
  * 4. Callback for when speech recognition provides a final answer.
  * @param {string} answer - The final answer from the speech service.
  */
-function handleSpeechEnd(answer) {
-    // Save to transcript
-    transcript.push({
-        question: questions[currentQuestionIndex],
-        answer: answer
-    });
-
-    // Move to the next question or finish
-    currentQuestionIndex++;
-    if (currentQuestionIndex < questions.length) {
-        askQuestion(currentQuestionIndex);
+async function handleSpeechEnd(answer) {
+    if (useGraphMode && sessionId) {
+        // === LANGGRAPH MODE ===
+        try {
+            // Submit answer to graph
+            const updatedState = await submitAnswer(sessionId, answer);
+            console.log("Submitted answer to graph. Updated state:", updatedState);
+            // Update local state
+            transcript.push({
+                question: updatedState.current_question || questions[currentQuestionIndex],
+                answer: answer
+            });
+            
+            // Check if interview is complete
+            if (updatedState.interview_complete) {
+                console.log("Interview complete according to graph state.");
+                finishInterviewFromGraph(updatedState);
+            } else {
+                // Ask next question
+                console.log("Asking next question from graph:", updatedState.current_question);
+                await askQuestionFromGraph(updatedState);
+            }
+        } catch (error) {
+            console.error("Error submitting answer:", error);
+            showModal("Error", `Failed to submit answer: ${error.message}`);
+        }
     } else {
-        finishInterview();
+        // === LEGACY MODE ===
+        // Save to transcript
+        transcript.push({
+            question: questions[currentQuestionIndex],
+            answer: answer
+        });
+
+        // Move to the next question or finish
+        currentQuestionIndex++;
+        if (currentQuestionIndex < questions.length) {
+            askQuestion(currentQuestionIndex);
+        } else {
+            finishInterview();
+        }
     }
 }
 
+/**
+ * Ask question from graph state (LangGraph mode)
+ * @param {object} state - The current interview state from graph
+ */
+async function askQuestionFromGraph(state) {
+    const question = state.current_question;
+    console.log("Asking question from graph:", question);
+    if (!question) {
+        // Get updated state
+        const updatedState = await getInterviewState(sessionId);
+        if (updatedState.current_question) {
+            questionText.textContent = updatedState.current_question;
+            currentQuestionIndex = updatedState.question_index;
+            updateStatus(`Asking question ${updatedState.question_index + 1} of ${updatedState.total_questions}...`);
+            
+            // Generate TTS and play
+            try {
+                const { audioData, mimeType } = await callGeminiTTS(updatedState.current_question);
+                playAudioAndListen(audioData, mimeType);
+            } catch (error) {
+                console.error("TTS Error:", error);
+                showModal("TTS Error", `Could not generate audio: ${error.message}. Starting to listen...`);
+                startListening();
+            }
+        } else {
+            finishInterviewFromGraph(updatedState);
+        }
+        return;
+    }
+    
+    questionText.textContent = question;
+    answerText.textContent = '';
+    currentQuestionIndex = state.question_index;
+    updateStatus(`Asking question ${state.question_index + 1} of ${state.total_questions}...`);
+    
+    // Generate TTS and play
+    try {
+        const { audioData, mimeType } = await callGeminiTTS(question);
+        playAudioAndListen(audioData, mimeType);
+    } catch (error) {
+        console.error("TTS Error:", error);
+        showModal("TTS Error", `Could not generate audio: ${error.message}. Starting to listen...`);
+        startListening();
+    }
+}
 
+/**
+ * Finish interview from graph state (LangGraph mode)
+ * @param {object} state - The final interview state
+ */
+async function finishInterviewFromGraph(state) {
+    updateStatus("Interview complete! Evaluation sent to hiring team.");
+    switchScreen('report');
+    reportStatus.textContent = "Your evaluation has been sent to the hiring team. Thank you!";
+    
+    // Store evaluation if available
+    if (state.evaluation) {
+        finalEvaluation = state.evaluation;
+    }
+}
 /**
  * 5. All questions are done, now evaluate the interview.
  */
@@ -162,12 +283,19 @@ async function finishInterview() {
 // --- Initial Event Listeners ---
 startInterviewBtn.addEventListener('click', handleStartInterview);
 restartBtn.addEventListener('click', () => {
-    // Reset everything
+    // Reset everything 
     switchScreen('setup');
     questions = [];
     transcript = [];
     currentQuestionIndex = 0;
     finalEvaluation = "";
+    sessionId = null;
+    
+    // Close WebSocket if open
+    if (interviewWebSocket) {
+        interviewWebSocket.close();
+        interviewWebSocket = null;
+    }
     
     // Clear form fields
     resumeFile.value = '';

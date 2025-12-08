@@ -1,2 +1,4 @@
 .venv
 .env
+voiceAgent/*
+*interview_state*
